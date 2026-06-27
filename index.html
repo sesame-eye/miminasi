@@ -45,11 +45,40 @@
             border-radius: 16px;
             text-align: left;
         }
-        .control-group { margin-bottom: 15px; }
+        .control-group { margin-bottom: 18px; }
         .control-group:last-child { margin-bottom: 0; }
         label { display: block; font-size: 14px; font-weight: bold; color: #aeaeae; }
         input[type="range"] { width: 100%; margin-top: 6px; }
         .value-disp { float: right; font-weight: bold; color: #34c759; }
+        
+        /* スイッチ（トグル）のスタイル */
+        .switch-label {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: pointer;
+        }
+        .switch-input { display: none; }
+        .switch-toggle {
+            position: relative;
+            width: 44px;
+            height: 24px;
+            background-color: #3a3a3c;
+            border-radius: 12px;
+            transition: background-color 0.2s;
+        }
+        .switch-toggle::after {
+            content: '';
+            position: absolute;
+            top: 2px; left: 2px;
+            width: 20px; height: 20px;
+            background-color: white;
+            border-radius: 50%;
+            transition: transform 0.2s;
+        }
+        .switch-input:checked + .switch-toggle { background-color: #34c759; }
+        .switch-input:checked + .switch-toggle::after { transform: translateX(20px); }
+
         #status { margin-top: 20px; font-size: 14px; color: #aeaeae; }
     </style>
 </head>
@@ -69,13 +98,22 @@
             <input type="range" id="phaseSlider" min="0" max="1" step="1" value="1">
         </div>
 
-        <!-- ピンポイント遮断ノッチフィルター -->
+        <!-- ピンポイント遮断ノッチフィルター ON/OFF付き -->
         <div class="control-group">
-            <label>不快音 狙い撃ちカット: <span id="notchVal" class="value-disp">120 Hz</span></label>
-            <input type="range" id="notchSlider" min="50" max="1000" step="5" value="120">
+            <div class="switch-label">
+                <label>🎯 不快音 狙い撃ちカット</label>
+                <label>
+                    <input type="checkbox" id="notchToggle" class="switch-input" checked>
+                    <div class="switch-toggle"></div>
+                </label>
+            </div>
+            <div style="margin-top: 8px;">
+                <label>カット周波数: <span id="notchVal" class="value-disp">120 Hz</span></label>
+                <input type="range" id="notchSlider" min="50" max="1000" step="5" value="120">
+            </div>
         </div>
 
-        <!-- スルー音量（耳栓の隙間から通す音の量） -->
+        <!-- スルー音量 -->
         <div class="control-group">
             <label>環境音の透過レベル: <span id="volumeVal" class="value-disp">0.10 倍</span></label>
             <input type="range" id="volumeSlider" min="0" max="1" step="0.05" value="0.10">
@@ -89,9 +127,11 @@
 let audioCtx = null;
 let mediaStreamSource = null;
 let localStream = null;
-let phaseGain = null;
 let notchFilter = null;
+let phaseGain = null;
 let outputGain = null;
+let splitter = null;
+let merger = null;
 
 const startBtn = document.getElementById('startBtn');
 const stopBtn = document.getElementById('stopBtn');
@@ -101,6 +141,7 @@ const phaseSlider = document.getElementById('phaseSlider');
 const phaseVal = document.getElementById('phaseVal');
 const notchSlider = document.getElementById('notchSlider');
 const notchVal = document.getElementById('notchVal');
+const notchToggle = document.getElementById('notchToggle');
 const volumeSlider = document.getElementById('volumeSlider');
 const volumeVal = document.getElementById('volumeVal');
 
@@ -109,7 +150,6 @@ phaseSlider.addEventListener('input', (e) => {
     const isInverse = parseInt(e.target.value) === 1;
     phaseVal.innerText = isInverse ? "逆位相 (ANC)" : "正相 (通常)";
     if (audioCtx && phaseGain) {
-        // 逆位相なら -1.0、正相なら 1.0 を乗算して波形をひっくり返す
         phaseGain.gain.setValueAtTime(isInverse ? -1.0 : 1.0, audioCtx.currentTime);
     }
 });
@@ -120,6 +160,14 @@ notchSlider.addEventListener('input', (e) => {
     notchVal.innerText = val + " Hz";
     if (audioCtx && notchFilter) {
         notchFilter.frequency.setValueAtTime(parseFloat(val), audioCtx.currentTime);
+    }
+});
+
+// ノッチフィルター ON/OFF切り替え
+notchToggle.addEventListener('change', (e) => {
+    if (audioCtx && notchFilter) {
+        // OFFの時はフィルターのタイプを「allpass（全通し）」にして無効化する
+        notchFilter.type = e.target.checked ? "notch" : "allpass";
     }
 });
 
@@ -144,25 +192,33 @@ startBtn.addEventListener('click', async () => {
 
         mediaStreamSource = audioCtx.createMediaStreamSource(localStream);
 
-        // 1. ノッチフィルター（指定した周波数だけを極端に急峻に削り落とす）
+        // 1. ノッチフィルター
         notchFilter = audioCtx.createBiquadFilter();
-        notchFilter.type = "notch";
-        notchFilter.Q.value = 10.0; // 値が大きいほど、ピンポイントにその音だけを削る
+        notchFilter.type = notchToggle.checked ? "notch" : "allpass";
+        notchFilter.Q.value = 10.0;
         notchFilter.frequency.value = notchSlider.value;
 
-        // 2. 位相反転ノード（GainNodeをマイナスにすることで波形を反転）
+        // 2. 位相反転ノード
         phaseGain = audioCtx.createGain();
         phaseGain.gain.value = parseInt(phaseSlider.value) === 1 ? -1.0 : 1.0;
 
-        // 3. 最終出力音量調整（耳栓としての透過度）
+        // 3. 最終出力音量調整
         outputGain = audioCtx.createGain();
         outputGain.gain.value = parseFloat(volumeSlider.value);
 
-        // 接続: マイク ＞ ノッチフィルター ＞ 位相反転 ＞ 音量調整 ＞ スピーカー/イヤホン
+        // 4. 両耳（ステレオ）分配ルーティング
+        splitter = audioCtx.createChannelSplitter(1);
+        merger = audioCtx.createChannelMerger(2);
+
+        // 接続：マイク ＞ ノッチ ＞ 位相 ＞ 音量 ＞ 分配 ＞ 左右結合 ＞ 出力
         mediaStreamSource.connect(notchFilter);
         notchFilter.connect(phaseGain);
         phaseGain.connect(outputGain);
-        outputGain.connect(audioCtx.destination);
+        outputGain.connect(splitter);
+        
+        splitter.connect(merger, 0, 0); // 左耳へ
+        splitter.connect(merger, 0, 1); // 右耳へ
+        merger.connect(audioCtx.destination);
 
         startBtn.disabled = true;
         stopBtn.disabled = false;
@@ -181,6 +237,8 @@ stopBtn.addEventListener('click', () => {
     if (notchFilter) notchFilter.disconnect();
     if (phaseGain) phaseGain.disconnect();
     if (outputGain) outputGain.disconnect();
+    if (splitter) splitter.disconnect();
+    if (merger) merger.disconnect();
     
     startBtn.disabled = false;
     stopBtn.disabled = true;
